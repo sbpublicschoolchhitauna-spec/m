@@ -1,0 +1,105 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1769d2">
+  <title>S.B. Public School Chhitauna Admin</title>
+</head>
+<body>
+  <div id="app"></div>
+  <main id="database-gate" class="gate">
+    <div class="gate-brand"><span class="gate-mark">SB</span><span>S.B. PUBLIC SCHOOL</span></div>
+    <p class="gate-eyebrow">PRIVATE ADMIN WORKSPACE</p>
+    <h1>Select school database</h1>
+    <p class="gate-copy">Choose the school's <strong>database.json</strong> file before signing in. All records will be read from and saved back to that file.</p>
+    <div id="gate-error" class="gate-error" role="alert" hidden></div>
+    <div class="gate-actions">
+      <button id="open-database" class="gate-primary" type="button">Choose existing database.json</button>
+      <button id="create-database" class="gate-secondary" type="button">Create new database.json</button>
+    </div>
+    <p class="gate-note">Use Chrome or Edge on this laptop. Keep the selected file in a secure folder and make manual copies when needed.</p>
+    <div class="gate-status"><span class="status-dot"></span><span>DATABASE NOT SELECTED</span></div>
+  </main>
+  <div id="startup-error" class="gate-error startup-error" role="alert" hidden></div>
+  <script src="./Manager.js"></script>
+  <script>
+    (function () {
+      var root = document.getElementById('app');
+      var gate = document.getElementById('database-gate');
+      var errorBox = document.getElementById('gate-error');
+      var openButton = document.getElementById('open-database');
+      var createButton = document.getElementById('create-database');
+      var appSource = '';
+      var launched = false;
+
+      function showError(message) { errorBox.textContent = message; errorBox.hidden = false; }
+      function setBusy(busy) { openButton.disabled = busy; createButton.disabled = busy; }
+      function pickerOptions() {
+        return { types: [{ description: 'School database', accept: { 'application/json': ['.json'] } }] };
+      }
+
+      function launchApp(fileName) {
+        if (launched) return;
+        launched = true;
+        gate.remove();
+        root.innerHTML = '<div class="gate-loading"><span class="status-dot"></span>Opening ' + fileName.replace(/[<>]/g, '') + '</div>';
+        var scriptMatch = appSource.match(/<script>([\s\S]*?)<\/script>/i);
+        if (!scriptMatch) { document.getElementById('startup-error').textContent = 'Admin app script could not be loaded.'; document.getElementById('startup-error').hidden = false; return; }
+        var script = document.createElement('script');
+        script.textContent = scriptMatch[1];
+        root.innerHTML = '';
+        root.dataset.page = 'admin';
+        document.body.appendChild(script);
+      }
+
+      async function loadFragments() {
+        var key = '?file-db=' + Date.now();
+        var results = await Promise.all([fetch('./styles.html' + key, { cache: 'no-store' }), fetch('./app.html' + key, { cache: 'no-store' })]);
+        if (!results[0].ok || !results[1].ok) throw new Error('Local app files could not be loaded. Start the server using start-local.ps1.');
+        var styleText = await results[0].text();
+        appSource = await results[1].text();
+        var match = styleText.match(/<style>([\s\S]*?)<\/style>/i);
+        if (!match) throw new Error('The local style file is incomplete.');
+        var style = document.createElement('style');
+        style.textContent = match[1] + '.gate{max-width:640px;margin:9vh auto 0;padding:36px 40px;background:#fff;border:1px solid #e4ebf3;border-radius:12px;box-shadow:0 18px 48px rgba(27,65,112,.09)}.gate-brand{display:flex;align-items:center;gap:11px;font:800 13px Manrope,sans-serif;color:#142945}.gate-mark{width:38px;height:38px;border-radius:10px;background:#1769d2;color:white;display:grid;place-items:center}.gate-eyebrow{margin:34px 0 8px;font-size:10px;font-weight:700;letter-spacing:.13em;color:#1769d2}.gate h1{font:800 27px Manrope,sans-serif;margin:0 0 9px}.gate-copy,.gate-note{color:#75859a;font-size:13px;line-height:1.6}.gate-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:24px 0 12px}.gate-actions button{min-height:44px;border-radius:7px;padding:10px 12px;font-weight:700;cursor:pointer}.gate-primary{background:#1769d2;border:1px solid #1769d2;color:#fff}.gate-secondary{background:#fff;border:1px solid #d6e1ed;color:#142945}.gate-actions button:disabled{opacity:.6;cursor:wait}.gate-status{display:flex;align-items:center;gap:8px;margin-top:24px;padding-top:15px;border-top:1px solid #e4ebf3;color:#b27612;font-size:10px;font-weight:700;letter-spacing:.08em}.status-dot{width:8px;height:8px;border-radius:50%;background:#e2a72c}.gate-error{margin:12px 0;padding:11px 12px;border:1px solid #f1cfd3;border-radius:6px;color:#a43240;background:#fff3f4;font-size:12px;line-height:1.5}.startup-error{max-width:640px;margin:28px auto}.gate-loading{padding:30px;text-align:center;color:#1769d2;font-weight:700}.gate-loading .status-dot{display:inline-block;margin-right:8px;background:#1769d2}@media(max-width:600px){.gate{margin:4vh 14px;padding:26px 20px}.gate h1{font-size:23px}.gate-actions{grid-template-columns:1fr}}';
+        document.head.appendChild(style);
+        if (!('showOpenFilePicker' in window) || !('showSaveFilePicker' in window)) {
+          showError('File selection and writing require a recent Chrome or Edge browser.');
+          openButton.disabled = true;
+          createButton.disabled = true;
+          return;
+        }
+        var remembered = await Manager.restoreDatabase();
+        if (remembered) launchApp(remembered.name);
+      }
+
+      openButton.addEventListener('click', async function () {
+        errorBox.hidden = true;
+        setBusy(true);
+        try {
+          var handles = await window.showOpenFilePicker(Object.assign(pickerOptions(), { multiple: false }));
+          var selected = await Manager.selectDatabase(handles[0]);
+          launchApp(selected.name);
+        } catch (error) {
+          if (error.name !== 'AbortError') showError(error.message);
+        } finally { setBusy(false); }
+      });
+
+      createButton.addEventListener('click', async function () {
+        errorBox.hidden = true;
+        setBusy(true);
+        try {
+          var file = await window.showSaveFilePicker(Object.assign(pickerOptions(), { suggestedName: 'database.json' }));
+          var created = await Manager.createDatabase(file);
+          launchApp(created.name);
+        } catch (error) {
+          if (error.name !== 'AbortError') showError(error.message);
+        } finally { setBusy(false); }
+      });
+
+      loadFragments().catch(function (error) { var box = document.getElementById('startup-error'); box.textContent = error.message; box.hidden = false; });
+    }());
+  </script>
+</body>
+</html>

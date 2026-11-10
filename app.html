@@ -1,0 +1,394 @@
+<script>
+(function () {
+  'use strict';
+  var root = document.getElementById('app');
+  var page = root.dataset.page;
+  var roleTitles = { admin: 'Administrator' };
+  var navSets = { admin: [['dashboard','◫','Dashboard'],['students','♙','Students'],['teachers','♧','Teachers'],['fees','₹','Fees'],['admit','▤','Admit cards'],['marks','▦','Exams & marks'],['settings','⚙','School settings'],['notices','▣','Notices']] };
+  var labels = { dashboard:'Dashboard', students:'Students', teachers:'Teachers', fees:'Fees', admit:'Admit cards', marks:'Exams & marks', settings:'School settings', notices:'Notices', admission:'Admission', records:'Class records', profile:'My profile' };
+  var collections = { students:'Student records', teachers:'Teacher records', fees:'Fee records', exams:'Exams', marks:'Marksheets', notices:'Notices', attendance:'Attendance', salaryRecords:'Salary records' };
+  var state = { token: '', user: null, data: null, section: 'dashboard', modal: null, modalRecord: null, search: '', classFilter: '', examFilter: '', dateFilter: '', minPaid: '', dirty: false, busy: false };
+
+  function esc(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, function (char) { return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[char]; }); }
+  function money(value) { return new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR',maximumFractionDigits:0}).format(Number(value || 0)); }
+  function initials(value) { return String(value || '?').split(/\s+/).slice(0,2).map(function (part) { return part.charAt(0); }).join('').toUpperCase(); }
+  function notify(message, error) {
+    var toast = document.createElement('div'); toast.className = 'toast'; toast.textContent = message;
+    if (error) toast.style.background = '#a43240'; document.body.appendChild(toast); setTimeout(function(){toast.remove();},3200);
+  }
+  function loading(show) {
+    var existing = document.querySelector('.loader');
+    if (show && !existing) { var el = document.createElement('div'); el.className='loader'; el.innerHTML='<div><div class="spinner"></div>Connecting to school database</div>'; document.body.appendChild(el); }
+    if (!show && existing) existing.remove();
+  }
+  function call(action, payload) { return Manager.call(action, payload || {}, state.token); }
+  function connectionStatus() {
+    var node = document.querySelector('.connection'); if (!node) return;
+    Manager.connection().then(function (result) { node.classList.toggle('offline', !result.connected); node.lastChild.textContent = result.connected ? (result.mode === 'online' ? 'LIVE DATABASE CONNECTED' : 'LOCAL DATABASE READY') : 'DATABASE OFFLINE'; }).catch(function () { node.classList.add('offline'); node.lastChild.textContent='DATABASE OFFLINE'; });
+  }
+  function loginView() {
+    root.innerHTML = '<div class="login-page"><section class="login-visual"><div><div class="brand"><div class="brand-mark" style="background:#fff;color:#1769d2">SB</div><span>S.B. PUBLIC SCHOOL</span></div><h1>S.B. Public School Chhitauna</h1><p>Chhitauna, Nichlaul, Maharajganj, UP</p><p>yourschool.cm</p></div><div class="connection"><i class="connection-dot"></i><span>CHECKING SCHOOL DATABASE</span></div></section><section class="login-side"><form class="login-form" id="login-form"><div class="eyebrow">Admin workspace</div><h2>Welcome back</h2><p>Sign in to manage school records.</p><div id="login-error"></div><div class="field"><label for="username">Admin username</label><input id="username" name="username" required autocomplete="username"></div><div class="field"><label for="password">Password</label><input id="password" name="password" type="password" required autocomplete="current-password"></div><button class="btn btn-primary" type="submit">Sign in <span>→</span></button><div class="login-help">Your selected database.json file stores the records on this laptop.</div></form></section></div>';
+    connectionStatus();
+  }
+  function navButtons(mobile) {
+    return (navSets[page] || []).map(function(item){return '<button class="nav-button '+(state.section===item[0]?'active':'')+'" data-section="'+item[0]+'"><span class="nav-icon">'+item[1]+'</span><span>'+esc(item[2])+'</span></button>';}).join('');
+  }
+  function shell(content) {
+    var school = state.data.settings || {};
+    var brand = school.schoolName || 'S.B. Public School Chhitauna';
+    var activeData = (state.data.teachers || []).find(function(item){return item.id===state.user.id;});
+    var image = activeData && activeData.photo || state.user.photo;
+    var avatar = image ? '<img class="avatar" src="'+esc(image)+'" alt="">' : '<div class="avatar">'+esc(initials(state.user.name))+'</div>';
+    root.innerHTML = '<div class="shell"><header class="topbar"><div class="brand"><div class="brand-mark">'+(school.logo?'<img src="'+esc(school.logo)+'" style="width:100%;height:100%;object-fit:cover;border-radius:10px">':'SB')+'</div><span>'+esc(brand)+'<small style="display:block;color:#75859a;font:10px DM Sans,sans-serif">'+esc(school.schoolWebsite||'yourschool.cm')+'</small></span></div><div class="top-actions"><div class="connection"><i class="connection-dot"></i><span>CHECKING DATABASE</span></div><div class="identity">'+avatar+'<span>'+esc(state.user.name)+' · '+esc(roleTitles[page])+'</span></div><button class="btn btn-sm" data-action="logout" title="Sign out">↪</button></div></header><div class="layout"><aside class="sidebar"><div class="side-label">Workspace</div><nav class="nav-list">'+navButtons(false)+'</nav></aside><main class="main">'+content+'</main></div><nav class="mobile-nav">'+navButtons(true)+'</nav></div>';
+    connectionStatus();
+  }
+  function pageHead(title, description, action) { return '<div class="page-head"><div><div class="eyebrow">'+esc(roleTitles[page])+' workspace</div><h1>'+esc(title)+'</h1><p>'+esc(description || '')+'</p></div>'+(action || '')+'</div>'; }
+  function stat(title, value, note, icon) { return '<div class="stat"><div class="stat-top"><span>'+esc(title)+'</span><span class="stat-icon">'+icon+'</span></div><div class="stat-value">'+esc(value)+'</div><div class="stat-note">'+esc(note || '')+'</div></div>'; }
+  function panel(title, content, action) { return '<section class="panel"><div class="panel-head"><h2>'+esc(title)+'</h2>'+(action||'')+'</div>'+content+'</section>'; }
+  function studentBySid(sid) { return (state.data.students||[]).find(function(item){return String(item.sid)===String(sid);}); }
+  function markExamEntries(record) {
+    if(record.examResults&&typeof record.examResults==='object') return Object.keys(record.examResults).map(function(key){return record.examResults[key];});
+    return record.examName?[record]:[];
+  }
+  function currentStudent() { return (state.data.students||[]).find(function(item){return item.id===state.user.id;}); }
+  function sums() {
+    var total=0, paid=0; (state.data.fees||[]).forEach(function(fee){total+=Number(fee.amount||0);paid+=Number(fee.paidAmount||0);});
+    return { total:total, paid:paid, due:Math.max(total-paid,(state.data.fees||[]).reduce(function(sum,item){return sum+Number(item.dueAmount||0);},0)) };
+  }
+  function dashboard() {
+    var studentCount=(state.data.students||[]).length, teacherCount=(state.data.teachers||[]).length, fees=sums();
+    if (page==='student') return studentDashboard();
+    if (page==='teacher') return teacherDashboard();
+    var recent=(state.data.students||[]).slice().sort(function(a,b){return String(b.createdAt||'').localeCompare(String(a.createdAt||''));}).slice(0,5);
+    var monthPoints=[];
+    for(var monthOffset=7;monthOffset>=0;monthOffset-=1){var monthDate=new Date();monthDate.setDate(1);monthDate.setMonth(monthDate.getMonth()-monthOffset);var monthKey=monthDate.toISOString().slice(0,7);var collected=(state.data.fees||[]).filter(function(fee){return String(fee.date||'').slice(0,7)===monthKey;}).reduce(function(sum,fee){return sum+Number(fee.paidAmount||0);},0);monthPoints.push({label:monthDate.toLocaleString('en',{month:'short'}),collected:collected});}
+    var maxCollection=Math.max.apply(null,monthPoints.map(function(item){return item.collected;}));
+    var chart=monthPoints.map(function(item){var ratio=maxCollection?item.collected/maxCollection:0;return '<div class="bar-group"><div class="bar-pair"><i class="bar" style="height:'+Math.max(4,ratio*100)+'%"></i><i class="bar" style="height:'+Math.max(4,ratio*70)+'%"></i></div><span class="bar-label">'+item.label+'</span></div>';}).join('');
+    var rows=recent.length?recent.map(function(item){return '<tr><td><div class="person">'+(item.photo?'<img class="avatar" src="'+esc(item.photo)+'">':'<span class="avatar">'+esc(initials(item.name))+'</span>')+'<span><strong>'+esc(item.name)+'</strong><small>SID '+esc(item.sid)+'</small></span></div></td><td>'+esc(item.className)+'</td><td>'+esc(item.academicYear||'—')+'</td><td>'+esc(item.createdAt?new Date(item.createdAt).toLocaleDateString():'—')+'</td></tr>';}).join(''):'<tr><td colspan="4"><div class="empty">Admissions will appear here.</div></td></tr>';
+    var welcome=page==='principal'?'School-wide overview':'A clear view of school activity today.';
+    return pageHead('Good '+(new Date().getHours()<12?'morning':new Date().getHours()<18?'afternoon':'evening')+', '+(state.user.name||'there').split(' ')[0],welcome,'<button class="btn btn-primary" data-action="open-form" data-collection="students">＋ Add admission</button>')+
+      '<div class="stats">'+stat('Total students',studentCount,'Current student records','♙')+stat('Total teachers',teacherCount,'Active teaching staff','♧')+stat('Fee collected',money(fees.paid),'Recorded payments','₹')+stat('Fee due',money(fees.due),'Outstanding balance','◷')+'</div>'+ 
+      '<div class="grid-two">'+panel('Fee collection','<div class="chart">'+chart+'</div><div class="report-line"><span>Paid to date</span><strong>'+money(fees.paid)+'</strong></div><div class="report-line"><span>Outstanding</span><strong>'+money(fees.due)+'</strong></div>','<span>Academic year '+esc(state.data.settings.academicYear||'')+'</span>')+
+      panel('Recent admissions','<div class="table-wrap"><table><thead><tr><th>Student</th><th>Class</th><th>Academic year</th><th>Joined</th></tr></thead><tbody>'+rows+'</tbody></table></div>','<button class="btn btn-sm" data-section="students">All students →</button>')+'</div>'+panel('Quick reports','<div class="report-line"><span>Students with marksheet records</span><strong>'+((state.data.marks||[]).length)+'</strong></div><div class="report-line"><span>Fee transactions this year</span><strong>'+((state.data.fees||[]).length)+'</strong></div><div class="report-line"><span>Teachers marked active</span><strong>'+((state.data.teachers||[]).filter(function(x){return x.active!==false;}).length)+'</strong></div>');
+  }
+  function studentDashboard() {
+    var student=currentStudent()||{}, feeRows=(state.data.fees||[]).slice().sort(function(a,b){return String(b.date||'').localeCompare(String(a.date||''));}).slice(0,4);
+    var feeTotal=sums();
+    return pageHead('Hello, '+(student.name||state.user.name||'Student').split(' ')[0],'Your school profile and latest records.')+'<div class="stats">'+stat('Class',student.className||'—','Current class','♙')+stat('SID',student.sid||'—','Student ID','№')+stat('Fee paid',money(feeTotal.paid),'Recorded payments','₹')+stat('Fee due',money(feeTotal.due),'Outstanding balance','◷')+'</div>'+panel('Recent fee records',feeRows.length?tableFor('fees',feeRows):'<div class="empty">No fee records yet.</div>','<button class="btn btn-sm" data-section="fees">All fees →</button>')+panel('School notices',noticesMarkup());
+  }
+  function teacherDashboard() {
+    var teacher=(state.data.teachers||[]).find(function(item){return item.id===state.user.id;})||{};
+    return pageHead('Welcome, '+(teacher.name||state.user.name||'Teacher').split(' ')[0],'Your assigned class: '+(teacher.assignedClass||state.user.assignedClass||'Not assigned'))+'<div class="stats">'+stat('Assigned class',teacher.assignedClass||state.user.assignedClass||'—','Class access','♙')+stat('Students',(state.data.students||[]).length,'In your class','♧')+stat('Fee entries',(state.data.fees||[]).length,'Recorded by your class','₹')+stat('Marksheets',(state.data.marks||[]).length,'Available records','▦')+'</div>'+panel('Class activity','<div class="report-line"><span>Student records</span><strong>'+(state.data.students||[]).length+'</strong></div><div class="report-line"><span>Attendance records</span><strong>'+(state.data.attendance||[]).length+'</strong></div><div class="report-line"><span>Fee entries</span><strong>'+(state.data.fees||[]).length+'</strong></div>','<button class="btn btn-sm" data-section="records">View class records →</button>')+panel('School notices',noticesMarkup());
+  }
+  function noticesMarkup() {
+    var now=Date.now(), items=(state.data.notices||[]).filter(function(item){return !item.expiresAt||new Date(item.expiresAt).getTime()>now;}).sort(function(a,b){return String(b.createdAt||'').localeCompare(String(a.createdAt||''));});
+    return items.length?items.map(function(item){return '<article class="notice"><strong>'+esc(item.title)+'</strong><p>'+esc(item.message)+'</p><small>'+esc(item.createdAt?new Date(item.createdAt).toLocaleString():'')+'</small></article>';}).join(''):'<div class="empty">No current notices.</div>';
+  }
+  function studentsPage() {
+    var records=(state.data.students||[]).filter(function(item){return (!state.classFilter||item.className===state.classFilter)&&(!state.search||(String(item.sid).includes(state.search)||String(item.name||'').toLowerCase().includes(state.search.toLowerCase())));});
+    var filters='<div class="toolbar"><input data-filter="search" value="'+esc(state.search)+'" placeholder="Search name or SID"><select data-filter="class"><option value="">All classes</option>'+options(state.data.settings.classes,state.classFilter)+'</select><button class="btn" data-action="print">Print filtered</button></div>';
+    var action=page==='admin'||page==='principal'||page==='teacher'?'<button class="btn btn-primary" data-action="open-form" data-collection="students">＋ Add student</button>':'';
+    return pageHead('Student records',records.length+' records · Search by SID and filter by class.',action)+panel('Students',filters+tableFor('students',records));
+  }
+  function teachersPage() {
+    var records=(state.data.teachers||[]).filter(function(item){return !state.search||String(item.id+' '+item.name).toLowerCase().includes(state.search.toLowerCase());}).sort(function(a,b){return String(a.id).localeCompare(String(b.id));});
+    var salaryRows=(state.data.salaryRecords||[]).filter(function(item){return !state.dateFilter||String(item.date||'').slice(0,10)===state.dateFilter;});
+    var content='<div class="toolbar"><input data-filter="search" value="'+esc(state.search)+'" placeholder="Search teacher ID or name"><button class="btn" data-action="print">Print teacher list</button></div>'+tableFor('teachers',records);
+    return pageHead('Teacher records','Teacher IDs, class assignments and staff status.',page==='admin'||page==='principal'?'<button class="btn btn-primary" data-action="open-form" data-collection="teachers">＋ Add teacher</button>':'')+panel('Teaching staff',content)+panel('Salary statement','<div class="toolbar"><input type="date" data-filter="date" value="'+esc(state.dateFilter)+'"><button class="btn btn-primary" data-action="open-form" data-collection="salaryRecords">＋ Record payment</button><button class="btn" data-action="print">Print statement</button></div>'+tableFor('salaryRecords',salaryRows));
+  }
+  function feesPage() {
+    var rows=(state.data.fees||[]).filter(function(item){return (!state.dateFilter||String(item.date||'').slice(0,10)===state.dateFilter)&&(!state.search||String(item.studentSid+' '+item.studentName).toLowerCase().includes(state.search.toLowerCase()));});
+    var canAdd=page!=='student';
+    return pageHead(page==='student'?'My fee records':'Fee management',page==='student'?'Payments and receipts associated with your SID.':'Date-wise fee statement, due amounts and printable receipts.',canAdd?'<button class="btn btn-primary" data-action="open-form" data-collection="fees">＋ Add fee</button>':'')+panel('Fee statement','<div class="toolbar"><input data-filter="search" value="'+esc(state.search)+'" placeholder="Search student SID or name"><input type="date" data-filter="date" value="'+esc(state.dateFilter)+'"><button class="btn" data-action="print">Print statement</button></div>'+tableFor('fees',rows));
+  }
+  function examsPage() {
+    var exams=state.data.exams||[];
+    var marks=(state.data.marks||[]).filter(function(item){var names=markExamEntries(item).map(function(result){return result.examName;});return (!state.search||String(item.studentName+' '+item.studentSid).toLowerCase().includes(state.search.toLowerCase()))&&(!state.examFilter||names.indexOf(state.examFilter)>=0)&&(!state.classFilter||item.className===state.classFilter);});
+    var examFilter='<select data-filter="exam"><option value="">All exams</option>'+options(exams.map(function(item){return item.name;}),state.examFilter)+'</select>';
+    return pageHead('Exams & marksheets','One marksheet record per student, with scores grouped by exam.','<button class="btn btn-primary" data-action="open-form" data-collection="exams">＋ Add exam</button>')+panel('Exam records',tableFor('exams',exams,'exams'))+panel('Marksheets','<div class="toolbar"><input data-filter="search" value="'+esc(state.search)+'" placeholder="Search student or SID">'+examFilter+'<select data-filter="class"><option value="">All classes</option>'+options(state.data.settings.classes,state.classFilter)+'</select><button class="btn btn-primary" data-action="open-form" data-collection="marks">＋ Enter marks</button><button class="btn" data-action="print">Print results</button></div>'+tableFor('marks',marks));
+  }
+  function admitPage() {
+    var minPaid=Number(state.minPaid||0);
+    var rows=(state.data.students||[]).filter(function(student){var total=(state.data.fees||[]).filter(function(fee){return String(fee.studentSid)===String(student.sid);}).reduce(function(sum,fee){return sum+Number(fee.paidAmount||0);},0);return (!state.classFilter||student.className===state.classFilter)&&(!state.search||String(student.sid+' '+student.name).toLowerCase().includes(state.search.toLowerCase()))&&total>=minPaid;});
+    return pageHead('Admit cards','Filter students and print individual or class-wise admit cards.')+panel('Student selection','<div class="toolbar"><select data-filter="class"><option value="">All classes</option>'+options(state.data.settings.classes,state.classFilter)+'</select><input data-filter="search" value="'+esc(state.search)+'" placeholder="Search student or SID"><input type="number" min="0" data-filter="minimum-fee" value="'+esc(state.minPaid)+'" placeholder="Minimum fee paid"><button class="btn" data-action="print-admits">Print filtered cards</button></div>'+tableFor('students',rows,'admit'));
+  }
+  function settingsPage() {
+    var s=state.data.settings||{};
+    var controls='<form id="settings-form"><div class="field-grid">'+field('schoolName','School name',s.schoolName)+field('schoolWebsite','School website',s.schoolWebsite)+field('academicYear','Academic year',s.academicYear)+field('principalName','Principal name',s.principalName)+field('principalContact','Principal contact',s.principalContact)+field('address','School address',s.address,'textarea')+field('logo','School logo','', 'file')+field('principalSignature','Principal signature','', 'file')+field('classes','Classes (one per line)',(s.classes||[]).join('\n'),'textarea')+field('subjects','Subjects (one per line)',(s.subjects||[]).join('\n'),'textarea')+field('exams','Exam names (one per line)',(s.exams||[]).join('\n'),'textarea')+field('sidRanges','SID ranges: class, first, last',sidRangesText(s.sidRanges),'textarea')+field('noticeTemplate','Notice template',s.noticeTemplate,'textarea')+field('admitCardTemplate','Admit card template',s.admitCardTemplate,'textarea')+field('marksheetTemplate','Marksheet template',s.marksheetTemplate,'textarea')+'</div><div class="toolbar"><button class="btn btn-primary" type="submit">Save school settings</button><button class="btn" type="button" data-action="open-form" data-collection="password">Change password</button></div></form><p class="upload-note">Images and documents are stored as Base64 in the selected database file. Keep each upload under 2 MB.</p>';
+    var loginSettings='<form id="username-form"><div class="field-grid">'+field('username','Admin username',state.user.username)+field('currentPassword','Current password','','password')+'</div><button class="btn btn-primary" type="submit">Update username</button></form><div class="toolbar" style="margin-top:12px"><button class="btn" data-action="remove-background">Remove white background from selected logo/signature</button></div>';
+    return pageHead('School settings','School identity, academic structure, print templates and account security.')+panel('School profile & templates',controls)+panel('Login settings',loginSettings);
+  }
+  function sidRangesText(ranges) { return Object.keys(ranges||{}).map(function(name){return name+', '+ranges[name][0]+', '+ranges[name][1];}).join('\n'); }
+  function noticesPage() {
+    return pageHead('School notices','Notices remain visible in the Admin dashboard for 24 hours.','<button class="btn btn-primary" data-action="open-form" data-collection="notices">＋ Publish notice</button>')+panel('Active notices',noticesMarkup()+tableFor('notices',state.data.notices||[]));
+  }
+  function profilePage() {
+    if(page==='student') return studentProfile();
+    var t=(state.data.teachers||[]).find(function(item){return item.id===state.user.id;})||{};
+    return pageHead('Teacher profile','Your account and assigned class details.')+panel('Profile details','<form id="profile-form"><div class="field-grid">'+field('name','Name',t.name||state.user.name)+field('mobile','Mobile number',t.mobile)+field('email','Email address',t.email)+field('assignedClass','Assigned class',t.assignedClass,'readonly')+field('photo','Profile photo','', 'file')+'</div><button class="btn btn-primary" type="submit">Save profile</button> <button class="btn" type="button" data-action="open-form" data-collection="password">Change password</button></form>');
+  }
+  function studentProfile() {
+    var student=currentStudent()||{};
+    return pageHead('My profile','Review and update your personal details.')+panel('Personal details','<form id="profile-form"><div class="field-grid">'+field('name','Student name',student.name)+field('className','Class',student.className,'readonly')+field('fatherName','Father name',student.fatherName)+field('motherName','Mother name',student.motherName)+field('mobile','Mobile number',student.mobile)+field('email','Email address',student.email)+field('address','Address',student.address,'textarea')+'<div class="field"><label>Student photo</label><div class="upload-note">Photo changes are managed by the school.</div></div></div><button class="btn btn-primary" type="submit">Save personal details</button> <button class="btn" type="button" data-action="open-form" data-collection="password">Change password</button></form>');
+  }
+  function genericRecords(title, collection) { return pageHead(title,'School records and activity.')+panel(title,tableFor(collection,state.data[collection]||[])); }
+  function render() {
+    if(!state.user||!state.data){loginView();return;}
+    if(state.user.role!==page){root.innerHTML='<div class="login-side"><div><h2>Wrong portal</h2><p>This account belongs to the '+esc(roleTitles[state.user.role]||'other')+' portal.</p><button class="btn" data-action="logout">Sign out</button></div></div>';return;}
+    var content;
+    switch(state.section){
+      case 'dashboard': content=dashboard(); break;
+      case 'students': case 'admission': content=studentsPage(); break;
+      case 'teachers': content=teachersPage(); break;
+      case 'fees': content=feesPage(); break;
+      case 'admit': content=admitPage(); break;
+      case 'marks': content=page==='admin'||page==='principal'?examsPage():genericRecords('Marksheets','marks'); break;
+      case 'settings': content=settingsPage(); break;
+      case 'notices': content=noticesPage(); break;
+      case 'profile': content=profilePage(); break;
+      case 'records': content=studentsPage()+panel('Attendance records',tableFor('attendance',state.data.attendance||[]),'<button class="btn btn-primary" data-action="open-form" data-collection="attendance">＋ Mark attendance</button>'); break;
+      case 'salaryRecords': content=genericRecords('Salary records','salaryRecords'); break;
+      default: content=dashboard();
+    }
+    shell(content);
+    if(state.modal) showModal();
+  }
+  function options(values, selected) { return (values||[]).map(function(value){return '<option '+(value===selected?'selected':'')+' value="'+esc(value)+'">'+esc(value)+'</option>';}).join(''); }
+  function field(name,label,value,type,attrs) {
+    var extra=attrs||'';
+    if(type==='readonly') return '<div class="field"><label>'+esc(label)+'</label><input name="'+esc(name)+'" value="'+esc(value)+'" readonly></div>';
+    if(type==='textarea') return '<div class="field"><label>'+esc(label)+'</label><textarea name="'+esc(name)+'" '+extra+'>'+esc(value)+'</textarea></div>';
+    if(type==='file') return '<div class="field"><label>'+esc(label)+'</label><input name="'+esc(name)+'" type="file" accept="'+(name==='documents'?'*/*':'image/*')+'" data-upload><span class="upload-note">File under 2 MB</span></div>';
+    if(type==='select') return '<div class="field"><label>'+esc(label)+'</label><select name="'+esc(name)+'" '+extra+'>'+value+'</select></div>';
+    return '<div class="field"><label>'+esc(label)+'</label><input name="'+esc(name)+'" value="'+esc(value)+'" '+(type==='number'?'type="number" min="0" step="0.01"':type==='date'?'type="date"':type==='email'?'type="email"':type==='password'?'type="password"':'type="text"')+' '+extra+'></div>';
+  }
+  function tableFor(collection, records, mode) {
+    records=records||[];
+    if(!records.length) return '<div class="empty">No records to display.</div>';
+    var headings={students:['Student','Class','Father name','Mobile','Fee due'],teachers:['Teacher','Subject','Assigned class','Salary','Status'],fees:['Student','Date','Month','Amount','Paid','Due'],exams:['Exam','Class','Date','Total marks'],marks:['Student','Class','Exam','Score','Percentage','Code'],notices:['Notice','Audience','Published','Expires'],attendance:['Student SID','Class','Date','Status'],salaryRecords:['Teacher','Date','Month','Amount']};
+    var keys={students:['name','className','fatherName','mobile'],teachers:['name','subject','assignedClass','salary'],fees:['studentName','date','month','amount','paidAmount','dueAmount'],exams:['name','className','date','totalMarks'],marks:['studentName','className','examName','totalScore','percentage','code'],notices:['title','audience','createdAt','expiresAt'],attendance:['studentSid','className','date','status'],salaryRecords:['teacherName','date','month','amount']};
+    var head=headings[collection]||['Name','Details'];
+    if(collection==='students') head=['Student','Class','Father name','Mobile','Fee due'];
+    var tableHead='<thead><tr>'+head.map(function(x){return '<th>'+esc(x)+'</th>';}).join('')+'<th>Actions</th></tr></thead>';
+    var body=records.map(function(item){
+      var cells=[];
+      if(collection==='students'){
+        var due=(state.data.fees||[]).filter(function(f){return String(f.studentSid)===String(item.sid);}).reduce(function(sum,f){return sum+Number(f.dueAmount||0);},0);
+        cells=['<div class="person">'+(item.photo?'<img class="avatar" src="'+esc(item.photo)+'">':'<span class="avatar">'+esc(initials(item.name))+'</span>')+'<span><strong>'+esc(item.name)+'</strong><small>SID '+esc(item.sid)+'</small></span></div>',esc(item.className),esc(item.fatherName||'—'),esc(item.mobile||'—'),money(due)];
+      } else if(collection==='teachers'){
+        cells=['<div class="person">'+(item.photo?'<img class="avatar" src="'+esc(item.photo)+'">':'<span class="avatar">'+esc(initials(item.name))+'</span>')+'<span><strong>'+esc(item.name)+'</strong><small>'+esc(item.id)+'</small></span></div>',esc(item.subject||'—'),esc(item.assignedClass||'—'),money(item.salary),'<span class="badge '+(item.active===false?'inactive':'')+'">'+(item.active===false?'Inactive':'Active')+'</span>'];
+      } else if(collection==='fees') cells=['<strong>'+esc(item.studentName||'—')+'</strong><small style="display:block;color:#8291a3">SID '+esc(item.studentSid||'—')+'</small>',esc(item.date||'—'),esc(item.month||'—'),money(item.amount),money(item.paidAmount),money(item.dueAmount)];
+      else if(collection==='marks') cells=[esc(item.studentName||item.studentSid)+'<small style="display:block;color:#8291a3">SID '+esc(item.studentSid)+'</small>',esc(item.className),esc(markExamEntries(item).map(function(result){return result.examName;}).join(', ')),esc(item.totalScore)+' / '+esc(item.totalPossible),esc(item.percentage)+'%','<code>'+esc(item.code||item.id)+'</code>'];
+      else if(collection==='notices') cells=['<strong>'+esc(item.title)+'</strong>',esc(item.audience||'all'),esc(item.createdAt?new Date(item.createdAt).toLocaleDateString():'—'),esc(item.expiresAt?new Date(item.expiresAt).toLocaleString():'—')];
+      else cells=(keys[collection]||['name']).map(function(key){return esc(item[key]===undefined?'—':item[key]);});
+      var receipt=collection==='fees'?'<button class="btn btn-sm" data-action="receipt" data-id="'+esc(item.id)+'">Receipt</button>':'';
+      var print=collection==='marks'||(collection==='students'&&mode==='admit')?'<button class="btn btn-sm" data-action="print-record" data-collection="'+collection+'" data-id="'+esc(item.id)+'">Print</button>':'';
+      var canDelete=['admin','principal'].indexOf(page)>=0;
+      var canEdit=canDelete||page==='teacher'&&collection==='students';
+      var actions=receipt+print+(canEdit&&['students','teachers','fees','exams','marks','notices'].indexOf(collection)>=0?'<button class="btn btn-sm" data-action="edit" data-collection="'+collection+'" data-id="'+esc(item.id)+'" title="Edit">Edit</button>':'')+(collection==='teachers'&&canDelete?'<button class="btn btn-sm" data-action="toggle-active" data-id="'+esc(item.id)+'">'+(item.active===false?'Activate':'Deactivate')+'</button>':'')+(canDelete?'<button class="btn btn-sm btn-danger" data-action="delete" data-collection="'+collection+'" data-id="'+esc(item.id)+'" title="Delete">×</button>':'');
+      return '<tr>'+cells.map(function(cell){return '<td>'+cell+'</td>';}).join('')+'<td><div class="toolbar" style="margin:0;gap:4px">'+actions+'</div></td></tr>';
+    }).join('');
+    return '<div class="table-wrap"><table>'+tableHead+'<tbody>'+body+'</tbody></table></div>';
+  }
+  function formFor(collection) {
+    var s=state.data.settings||{}, student=collection==='students'?{}:null, values=s.classes||[], fields='';
+    if(collection==='students'){
+      fields=field('name','Student name','')+field('className','Class','<option value="">Select class</option>'+options(values,''),'select')+field('fatherName','Father name','')+field('motherName','Mother name','')+field('mobile','Mobile number','')+field('email','Email ID','','email')+field('academicYear','Academic year',s.academicYear||'')+field('feeAmount','Annual fee','0','number')+field('dob','Date of birth','','date')+field('gender','Gender','<option value="">Select</option><option>Female</option><option>Male</option><option>Other</option>','select')+field('address','Address','','textarea')+field('photo','Student photo','','file')+field('documents','Documents','','file')+field('password','Student password (8+ characters)','','password');
+    } else if(collection==='teachers'){
+      fields=field('name','Teacher name','')+field('subject','Subject','<option value="">Select subject</option>'+options(s.subjects||[],''),'select')+field('assignedClass','Class teacher assignment','<option value="">Select class</option>'+options(values,''),'select')+field('salary','Monthly salary','0','number')+field('mobile','Mobile number','')+field('email','Email ID','','email')+field('photo','Teacher photo','','file')+field('active','Account status','<option value="true">Active</option><option value="false">Inactive</option>','select')+field('password','Temporary password (8+ characters)','','password');
+    } else if(collection==='principals'){
+      fields=field('name','Principal name','')+field('mobile','Mobile number','')+field('email','Email ID','','email')+field('password','Temporary password (8+ characters)','','password');
+    } else if(collection==='fees'){
+      var studentOptions=(state.data.students||[]).map(function(item){return '<option value="'+esc(item.sid)+'" data-name="'+esc(item.name)+'" data-class="'+esc(item.className)+'">'+esc(item.sid)+' · '+esc(item.name)+'</option>';}).join('');
+      fields=field('studentSid','Student SID','<option value="">Select student</option>'+studentOptions,'select','id="fee-student"')+field('studentName','Student name','','readonly')+field('className','Class','','readonly')+field('date','Payment date',new Date().toISOString().slice(0,10),'date')+field('month','Month','')+field('amount','Fee amount','0','number')+field('paidAmount','Paid amount','0','number');
+    } else if(collection==='exams'){
+      fields=field('name','Exam name','')+field('className','Class','<option value="">Select class</option>'+options(values,''),'select')+field('date','Exam date','','date')+field('totalMarks','Total marks','100','number');
+    } else if(collection==='marks'){
+      var marksStudents=(state.data.students||[]).map(function(item){return '<option value="'+esc(item.sid)+'" data-name="'+esc(item.name)+'" data-class="'+esc(item.className)+'">'+esc(item.sid)+' · '+esc(item.name)+' · '+esc(item.className)+'</option>';}).join('');
+      var examOptions=(state.data.exams||[]).map(function(item){return '<option value="'+esc(item.id)+'">'+esc(item.name)+'</option>';}).join('');
+      var marksInputs=(s.subjects||[]).map(function(subject,index){return field('subject-'+index,subject+' marks','0','number')+field('total-'+index,subject+' total marks','100','number');}).join('');
+      fields=field('studentSid','Student','<option value="">Select student</option>'+marksStudents,'select','id="marks-student"')+field('studentName','Student name','','readonly')+field('className','Class','','readonly')+field('examName','Exam','<option value="">Select exam</option>'+examOptions,'select','id="marks-exam"')+marksInputs;
+    } else if(collection==='notices'){
+      fields=field('title','Notice title','')+field('audience','Audience','<option value="all">Students & teachers</option><option value="teachers">Teachers</option><option value="students">Students</option>','select')+field('message','Notice details','','textarea');
+    } else if(collection==='attendance'){
+      var attendanceStudents=(state.data.students||[]).map(function(item){return '<option>'+esc(item.sid)+' · '+esc(item.name)+'</option>';}).join('');
+      fields=field('studentSid','Student','<option value="">Select student</option>'+attendanceStudents,'select')+field('className','Class',state.user.assignedClass||'','readonly')+field('date','Date',new Date().toISOString().slice(0,10),'date')+field('status','Attendance','<option>Present</option><option>Absent</option>','select');
+    } else if(collection==='salaryRecords'){
+      fields=field('teacherId','Teacher ID','')+field('teacherName','Teacher name','')+field('date','Payment date',new Date().toISOString().slice(0,10),'date')+field('month','Salary month','')+field('amount','Amount','0','number');
+    } else if(collection==='password'){
+      fields=field('currentPassword','Current password','','password')+field('newPassword','New password','','password')+field('confirmPassword','Confirm new password','','password');
+    }
+    return '<form id="record-form" data-collection="'+esc(collection)+'">'+(state.modalRecord?'<input type="hidden" name="id" value="'+esc(state.modalRecord.id)+'">':'')+'<div class="field-grid">'+fields+'</div><div class="toolbar"><button class="btn btn-primary" type="submit">Save '+esc(collection==='students'?'admission':collection==='fees'?'payment':collection==='marks'?'marksheet':collection==='principals'?'account':collection==='password'?'password':collection.slice(0,-1))+'</button><button class="btn" type="button" data-action="close-modal">Cancel</button></div></form>';
+  }
+  function showModal() {
+    var collection=state.modal;
+    var title={students:state.modalRecord?'Edit student':'Add admission',teachers:state.modalRecord?'Edit teacher':'Add teacher',principals:'Create principal account',fees:'Record fee payment',exams:'Create exam',marks:'Enter subject marks',notices:'Publish notice',attendance:'Record attendance',salaryRecords:'Record salary payment',password:'Change password'}[collection]||'Add record';
+    var modal=document.createElement('div'); modal.className='modal-backdrop'; modal.id='modal';
+    modal.innerHTML='<section class="modal"><div class="modal-head"><h2>'+esc(title)+'</h2><button class="btn btn-sm" data-action="close-modal">×</button></div>'+formFor(collection)+'</section>';
+    document.body.appendChild(modal);
+    Array.prototype.forEach.call(modal.querySelectorAll('input[type="password"]'),function(input){var toggle=document.createElement('button');toggle.type='button';toggle.className='btn btn-sm';toggle.textContent='Show';toggle.style.marginTop='5px';input.insertAdjacentElement('afterend',toggle);toggle.addEventListener('click',function(){var reveal=input.type==='password';input.type=reveal?'text':'password';toggle.textContent=reveal?'Hide':'Show';});});
+    if(state.modalRecord){
+      var form=modal.querySelector('#record-form');
+      Object.keys(state.modalRecord).forEach(function(key){var input=form.elements.namedItem(key);if(input&&input.type!=='file'&&input.type!=='hidden')input.value=state.modalRecord[key];});
+      if(collection==='marks') (state.modalRecord.subjectMarks||[]).forEach(function(item,index){var score=form.elements.namedItem('subject-'+index),total=form.elements.namedItem('total-'+index);if(score)score.value=item.marks;if(total)total.value=item.total;});
+    }
+  }
+  function hideModal(){var modal=document.getElementById('modal');if(modal)modal.remove();state.modal=null;state.modalRecord=null;}
+  function fileToData(file) { return new Promise(function(resolve,reject){if(!file){resolve('');return;} if(file.size>2*1024*1024){reject(new Error('Choose an image or document smaller than 2 MB.'));return;}var reader=new FileReader();reader.onload=function(){resolve(reader.result);};reader.onerror=function(){reject(new Error('Could not read the selected file.'));};reader.readAsDataURL(file);}); }
+  function readForm(form) {
+    var record={}; Array.prototype.forEach.call(form.elements,function(el){if(!el.name||el.type==='file'||el.name==='confirmPassword')return;record[el.name]=el.value;});
+    return Array.prototype.reduce.call(form.querySelectorAll('[data-upload]'),function(promise,input){return promise.then(function(){if(input.dataset.dataOverride){record[input.name]=input.dataset.dataOverride;return;}return fileToData(input.files[0]).then(function(value){if(value)record[input.name]=value;});});},Promise.resolve()).then(function(){return record;});
+  }
+  function setSection(section){state.section=section;state.search='';state.classFilter='';state.examFilter='';state.dateFilter='';state.minPaid='';state.dirty=false;state.modal=null;state.modalRecord=null;render();}
+  function refresh() { return call('getData').then(function(result){state.data=result.data;state.user=result.user;state.dirty=false;render();}).catch(function(error){state.token='';state.user=null;state.data=null;render();notify(error.message,true);}); }
+  function printRecord(collection,id) {
+    var record=(state.data[collection]||[]).find(function(item){return item.id===id;}); if(!record)return;
+    var school=state.data.settings||{}, content='';
+    if(collection==='fees') content='<h1>Fee Receipt</h1><p>Receipt: '+esc(record.id)+'</p><p>Student: '+esc(record.studentName)+' (SID '+esc(record.studentSid)+')</p><p>Class: '+esc(record.className)+'</p><p>Date: '+esc(record.date)+'</p><p>Month: '+esc(record.month)+'</p><h2>Paid: '+money(record.paidAmount)+'</h2><p>Due: '+money(record.dueAmount)+'</p>';
+    else if(collection==='students'){
+      var admitData={schoolName:school.schoolName||'',schoolWebsite:school.schoolWebsite||'yourschool.cm',studentName:record.name||'',sid:record.sid||'',className:record.className||'',academicYear:record.academicYear||'',dob:record.dob||'',fatherName:record.fatherName||''};
+      content=school.admitCardTemplate?applyTemplate(school.admitCardTemplate,admitData):'<h1>'+esc(school.schoolName||'S.B. Public School Chhitauna')+'</h1><p>'+esc(school.schoolWebsite||'yourschool.cm')+'</p><h2>Admit Card</h2><p>'+esc(record.name)+' · SID '+esc(record.sid)+'</p><p>Class: '+esc(record.className)+'</p><p>Academic year: '+esc(record.academicYear)+'</p><p>Date of birth: '+esc(record.dob)+'</p>';
+    } else {
+      var examResults=markExamEntries(record);
+      var marksStudent=studentBySid(record.studentSid)||{};
+      record.fatherName=record.fatherName||marksStudent.fatherName||'';
+      record.motherName=record.motherName||marksStudent.motherName||'';
+      record.dob=record.dob||marksStudent.dob||'';
+      record.address=record.address||marksStudent.address||'';
+      record.rollNo=record.rollNo||marksStudent.rollNo||record.studentSid;
+      var subjectNames=(state.data.settings.subjects||[]).slice();
+      examResults.forEach(function(exam){(exam.subjectMarks||[]).forEach(function(subject){if(subjectNames.indexOf(subject.subject)<0)subjectNames.push(subject.subject);});});
+      var examHeaders=examResults.map(function(exam){return '<th colspan="2">'+esc(exam.examName)+'</th>';}).join('');
+      var subHeaders=examResults.map(function(){return '<th>MM</th><th>Obt.</th>';}).join('');
+      var totals={obtained:0,possible:0};
+      var markRows=subjectNames.map(function(subjectName){
+        var subjectObtained=0,subjectPossible=0;
+        var examCells=examResults.map(function(exam){var score=(exam.subjectMarks||[]).find(function(item){return item.subject===subjectName;});var obtained=score?Number(score.marks||0):0;var possible=score?Number(score.total||0):0;subjectObtained+=obtained;subjectPossible+=possible;return '<td>'+esc(possible||'—')+'</td><td>'+esc(score?obtained:'—')+'</td>';}).join('');
+        totals.obtained+=subjectObtained;totals.possible+=subjectPossible;
+        return '<tr><td>'+esc(subjectName)+'</td>'+examCells+'<td>'+esc(subjectPossible||'—')+'</td><td>'+esc(subjectObtained)+'</td><td>'+gradeFor(subjectPossible?subjectObtained/subjectPossible*100:0)+'</td></tr>';
+      }).join('');
+      var grandExamCells=examResults.map(function(exam){var possible=(exam.subjectMarks||[]).reduce(function(sum,item){return sum+Number(item.total||0);},0);var obtained=(exam.subjectMarks||[]).reduce(function(sum,item){return sum+Number(item.marks||0);},0);return '<td>'+possible+'</td><td>'+obtained+'</td>';}).join('');
+      var percent=totals.possible?Math.round(totals.obtained/totals.possible*10000)/100:0;
+      var resultTable='<table class="marks-grid"><thead><tr><th rowspan="2">Subject</th>'+examHeaders+'<th colspan="2">Grand Total</th><th rowspan="2">Grade</th></tr><tr>'+subHeaders+'<th>M.M.</th><th>Obt.</th></tr></thead><tbody>'+markRows+'<tr class="total-row"><th>Total</th>'+grandExamCells+'<th>'+totals.possible+'</th><th>'+totals.obtained+'</th><th>'+gradeFor(percent)+'</th></tr></tbody></table>';
+      var examTitle=examResults.map(function(exam){return exam.examName;}).join(' + ');
+      var markData={schoolName:school.schoolName||'',schoolWebsite:school.schoolWebsite||'yourschool.cm',studentName:record.studentName||'',studentSid:record.studentSid||'',className:record.className||'',examName:examTitle,totalScore:totals.obtained,totalPossible:totals.possible,percentage:percent,marksheetCode:record.code||record.id,subjectRows:markRows,examHeaders:examHeaders,examSubHeaders:subHeaders};
+      content=school.marksheetTemplate?applyTemplate(school.marksheetTemplate,markData):'<header class="school-head">'+(school.logo?'<img src="'+esc(school.logo)+'" alt="School logo">':'')+'<div><h1>'+esc(school.schoolName||'School')+'</h1><p>'+esc(school.address||'')+' &nbsp; | &nbsp; Call: '+esc(school.principalContact||'')+' &nbsp; | &nbsp; '+esc(school.schoolWebsite||'yourschool.cm')+'</p><h2>'+esc(examTitle||'EXAMINATION RESULT')+' RESULT</h2></div></header><table class="student-meta"><tr><td><b>Registration No.:</b> '+esc(record.studentSid)+'</td><td><b>Class:</b> '+esc(record.className)+'</td><td><b>Roll No.:</b> '+esc(record.rollNo||record.studentSid)+'</td></tr><tr><td><b>Student\'s Name:</b> '+esc(record.studentName)+'</td><td><b>Father\'s Name:</b> '+esc(record.fatherName||'')+'</td><td><b>Mother\'s Name:</b> '+esc(record.motherName||'')+'</td></tr><tr><td><b>Date of Birth:</b> '+esc(record.dob||'')+'</td><td colspan="2"><b>Address:</b> '+esc(record.address||'')+'</td></tr></table>'+resultTable+'<table class="result-summary"><tr><td><b>Total Marks:</b> '+totals.possible+'</td><td><b>Obtained Marks:</b> '+totals.obtained+'</td><td><b>Percentage:</b> '+percent+'%</td><td><b>Overall Grade:</b> '+gradeFor(percent)+'</td><td><b>Issue Date:</b> '+new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'})+'</td></tr></table>';
+      content+='<footer class="signatures"><div>Parents / Guardian Sign.</div><div>Class Teacher Sign.</div><div>'+(school.principalSignature?'<img src="'+esc(school.principalSignature)+'" alt="">':'')+'Principal Sign & Stamp</div></footer>';
+    }
+    var popup=window.open('','_blank'); if(!popup){notify('Allow pop-ups to print.',true);return;}
+    popup.document.write('<!doctype html><html><head><title>'+esc(school.schoolName||'School')+'</title><style>@page{size:landscape;margin:12mm}*{box-sizing:border-box}body{font:11px Arial,sans-serif;color:#111;padding:0}.school-head{display:grid;grid-template-columns:78px 1fr;align-items:center;text-align:center;border-bottom:2px solid #222;padding:0 0 10px;margin-bottom:9px}.school-head img{width:68px;height:68px;object-fit:contain}.school-head h1{font-size:27px;letter-spacing:1px;margin:0 0 5px}.school-head p{font-size:10px;margin:0 0 8px}.school-head h2{display:inline-block;font-size:15px;margin:0;border:1px solid #222;padding:7px 18px}.student-meta,.marks-grid,.result-summary{width:100%;border-collapse:collapse;margin:8px 0}.student-meta td,.marks-grid td,.marks-grid th,.result-summary td{border:1px solid #222;padding:6px}.student-meta td{width:33.33%}.marks-grid{text-align:center}.marks-grid th{background:#ddd}.marks-grid td:first-child,.marks-grid th:first-child{text-align:left}.marks-grid tbody tr:nth-child(odd){background:#e2e2e2}.marks-grid .total-row{background:#eee!important;font-weight:bold}.result-summary td{text-align:center;font-size:10px}.signatures{display:grid;grid-template-columns:repeat(3,1fr);gap:30px;margin-top:42px;text-align:center;font-weight:bold}.signatures div{border-top:1px solid #222;padding-top:7px}.signatures img{display:block;max-height:42px;max-width:130px;object-fit:contain;margin:-38px auto 2px}@media print{body{print-color-adjust:exact;-webkit-print-color-adjust:exact}}</style></head><body>'+content+'</body></html>');popup.document.close();popup.focus();setTimeout(function(){popup.print();},300);
+  }
+  function printAdmits() {
+    var students=(state.data.students||[]).filter(function(student){
+      var paid=(state.data.fees||[]).filter(function(fee){return String(fee.studentSid)===String(student.sid);}).reduce(function(sum,fee){return sum+Number(fee.paidAmount||0);},0);
+      return (!state.classFilter||student.className===state.classFilter)&&(!state.search||String(student.sid+' '+student.name).toLowerCase().includes(state.search.toLowerCase()))&&paid>=Number(state.minPaid||0);
+    });
+    if(!students.length){notify('No students match these filters.',true);return;}
+    var school=state.data.settings||{};
+    var cards=students.map(function(student){var values={schoolName:school.schoolName||'',schoolWebsite:school.schoolWebsite||'yourschool.cm',studentName:student.name||'',sid:student.sid||'',className:student.className||'',academicYear:student.academicYear||'',dob:student.dob||'',fatherName:student.fatherName||''};return '<article class="card">'+(school.admitCardTemplate?applyTemplate(school.admitCardTemplate,values):'<h2>'+esc(school.schoolName||'S.B. Public School Chhitauna')+'</h2><p>'+esc(school.schoolWebsite||'yourschool.cm')+'</p><h3>Admit Card</h3><p>'+esc(student.name)+' · SID '+esc(student.sid)+'</p><p>Class: '+esc(student.className)+' · '+esc(student.academicYear)+'</p><p>Date of birth: '+esc(student.dob)+'</p>')+'</article>';}).join('');
+    var popup=window.open('','_blank');if(!popup){notify('Allow pop-ups to print.',true);return;}
+    popup.document.write('<!doctype html><html><head><title>Admit cards · '+esc(school.schoolName||'School')+'</title><style>body{font:14px Arial;color:#142945;padding:24px}h2{color:#1769d2}.card{min-height:240px;border:1px solid #9db8d8;padding:22px;margin:0 0 18px;page-break-after:always}.logo{max-height:55px}@media print{body{padding:0}}</style></head><body>'+(school.logo?'<img class="logo" src="'+esc(school.logo)+'">':'')+cards+'</body></html>');popup.document.close();popup.focus();setTimeout(function(){popup.print();},300);
+  }
+  function applyTemplate(template, values) { return String(template||'').replace(/\{\{([A-Za-z0-9_]+)\}\}/g,function(match,key){return values[key]===undefined?'':values[key];}); }
+  function gradeFor(percent) { return percent>=90?'A+':percent>=80?'A':percent>=70?'B':percent>=60?'C':percent>=50?'D':'E'; }
+  document.addEventListener('click',function(event){
+    var button=event.target.closest('[data-action],[data-section]');if(!button)return;
+    if(button.dataset.section){setSection(button.dataset.section);return;}
+    var action=button.dataset.action;
+    if(action==='logout'){Manager.call('logout',{},state.token).catch(function(){});state.token='';state.user=null;state.data=null;render();}
+    if(action==='open-form'){state.modal=button.dataset.collection;showModal();}
+    if(action==='edit'){
+      var collection=button.dataset.collection;
+      state.modalRecord=(state.data[collection]||[]).find(function(item){return item.id===button.dataset.id;})||null;
+      state.modal=collection;showModal();
+    }
+    if(action==='toggle-active'){
+      var teacher=(state.data.teachers||[]).find(function(item){return item.id===button.dataset.id;});
+      if(teacher){loading(true);call('save',{collection:'teachers',record:Object.assign({},teacher,{active:teacher.active===false})}).then(function(){notify('Teacher status updated.');return refresh();}).catch(function(error){notify(error.message,true);}).finally(function(){loading(false);});}
+    }
+    if(action==='remove-background'){
+      var fileInput=Array.prototype.find.call(root.querySelectorAll('#settings-form input[name="logo"], #settings-form input[name="principalSignature"]'),function(input){return input.files&&input.files[0];});
+      if(!fileInput||!fileInput.files[0]){notify('Choose a logo or signature image first.',true);return;}
+      fileToData(fileInput.files[0]).then(function(source){var image=new Image();image.onload=function(){var canvas=document.createElement('canvas');canvas.width=image.width;canvas.height=image.height;var context=canvas.getContext('2d');context.drawImage(image,0,0);var pixels=context.getImageData(0,0,canvas.width,canvas.height);for(var index=0;index<pixels.data.length;index+=4){if(pixels.data[index]>235&&pixels.data[index+1]>235&&pixels.data[index+2]>235)pixels.data[index+3]=0;}context.putImageData(pixels,0,0);fileInput.dataset.dataOverride=canvas.toDataURL('image/png');notify('White background removed from selected image.');};image.onerror=function(){notify('Could not process that image.',true);};image.src=source;}).catch(function(error){notify(error.message,true);});
+    }
+    if(action==='close-modal')hideModal();
+    if(action==='print')window.print();
+    if(action==='print-admits')printAdmits();
+    if(action==='print-record')printRecord(button.dataset.collection,button.dataset.id);
+    if(action==='receipt')printRecord('fees',button.dataset.id);
+    if(action==='delete'&&window.confirm('Delete this record permanently?')){loading(true);call('remove',{collection:button.dataset.collection,id:button.dataset.id}).then(function(){notify('Record deleted.');return refresh();}).catch(function(error){notify(error.message,true);}).finally(function(){loading(false);});}
+  });
+  document.addEventListener('change',function(event){
+    var target=event.target;
+    if(target.matches('[data-upload]'))delete target.dataset.dataOverride;
+    if(target.matches('[data-filter="class"]')){state.classFilter=target.value;render();}
+    if(target.matches('[data-filter="exam"]')){state.examFilter=target.value;render();}
+    if(target.matches('[data-filter="date"]')){state.dateFilter=target.value;render();}
+    if(target.matches('[data-filter="minimum-fee"]')){state.minPaid=target.value;render();}
+    if(target.id==='fee-student'||target.id==='marks-student'){
+      var option=target.options[target.selectedIndex], form=target.closest('form');
+      if(option){var name=form.querySelector('[name="studentName"]'), classField=form.querySelector('[name="className"]');if(name)name.value=option.dataset.name||'';if(classField)classField.value=option.dataset.class||'';}
+    }
+  });
+  var searchTimer;
+  document.addEventListener('input',function(event){
+    if(event.target.matches('[data-filter="search"]')){
+      state.search=event.target.value;
+      clearTimeout(searchTimer);
+      searchTimer=setTimeout(function(){var current=state.search;render();var input=root.querySelector('[data-filter="search"]');if(input){input.focus();input.setSelectionRange(current.length,current.length);}},180);
+    } else if(state.user&&event.target.closest('form')) state.dirty=true;
+  });
+  document.addEventListener('submit',function(event){
+    event.preventDefault(); var form=event.target;
+    if(form.id==='login-form'){
+      var formData=new FormData(form); loading(true);
+      Manager.login(formData.get('username'),formData.get('password')).then(function(result){
+        if(result.user.role!==page)throw new Error('This account belongs to the '+(roleTitles[result.user.role]||'other')+' portal.');
+        state.token=result.token;return refresh();
+      }).catch(function(error){var box=document.getElementById('login-error');if(box)box.innerHTML='<div class="error-box">'+esc(error.message)+'</div>';}).finally(function(){loading(false);});
+      return;
+    }
+    if(form.id==='settings-form'){
+      loading(true);readForm(form).then(function(values){
+        var settings=Object.assign({},state.data.settings,values);
+        ['classes','subjects','exams'].forEach(function(key){settings[key]=String(settings[key]||'').split('\n').map(function(x){return x.trim();}).filter(Boolean);});
+        settings.sidRanges=String(settings.sidRanges||'').split('\n').reduce(function(result,line){if(!line.trim())return result;var parts=line.split(',').map(function(value){return value.trim();});if(parts.length!==3||!/^\d+$/.test(parts[1])||!/^\d+$/.test(parts[2]))throw new Error('Enter SID ranges as class, first SID, last SID.');result[parts[0]]=[Number(parts[1]),Number(parts[2])];return result;},{});
+        return call('updateSettings',{settings:settings});
+      }).then(function(){notify('School settings saved.');return refresh();}).catch(function(error){notify(error.message,true);}).finally(function(){loading(false);});return;
+    }
+    if(form.id==='username-form'){
+      loading(true);var usernameData=new FormData(form);call('changeUsername',{username:usernameData.get('username'),currentPassword:usernameData.get('currentPassword')}).then(function(){notify('Username updated.');return refresh();}).catch(function(error){notify(error.message,true);}).finally(function(){loading(false);});return;
+    }
+    if(form.id==='profile-form'){
+      loading(true);readForm(form).then(function(record){var collection=page==='student'?'students':'teachers';record.id=state.user.id;return call('save',{collection:collection,record:record});}).then(function(){notify('Profile saved.');return refresh();}).catch(function(error){notify(error.message,true);}).finally(function(){loading(false);});return;
+    }
+    if(form.id==='record-form'){
+      var collection=form.dataset.collection;var noticeDraft=null;loading(true);
+      readForm(form).then(function(record){
+        if(collection==='password'){
+          var confirmField=form.elements.namedItem('confirmPassword');
+          if(!confirmField||record.newPassword!==confirmField.value)throw new Error('Passwords do not match.');
+          return call('changePassword',{currentPassword:record.currentPassword,newPassword:record.newPassword}).then(function(){return {passwordChanged:true};});
+        }
+        if(collection==='marks'){
+          var selectedExam=(state.data.exams||[]).find(function(item){return item.id===record.examName;});
+          if(!selectedExam)throw new Error('Select an exam from Exam records first.');
+          record.examId=selectedExam.id;
+          record.examName=selectedExam.name;
+          record.subjectMarks=(state.data.settings.subjects||[]).map(function(subject,index){return {subject:subject,marks:Number(record['subject-'+index]||0),total:Number(record['total-'+index]||0)};});
+          Object.keys(record).filter(function(key){return key.indexOf('subject-')===0||key.indexOf('total-')===0;}).forEach(function(key){delete record[key];});
+          record.code=record.code||'MS-'+Date.now().toString(36).toUpperCase();
+        }
+        if(collection==='notices'){
+          if(!record.createdAt)record.createdAt=new Date().toISOString();record.expiresAt=new Date(Date.now()+24*60*60*1000).toISOString();noticeDraft={title:record.title,message:record.message};
+        }
+        if(collection==='attendance'&&record.studentSid){record.studentSid=record.studentSid.split(' · ')[0];}
+        return call('save',{collection:collection,record:record});
+      }).then(function(result){hideModal();if(result.passwordChanged){notify('Password changed.');return refresh();}var saved=result.record||{};notify((collection==='students'?'Admission saved · SID ':collection==='teachers'?'Teacher saved · ID ':collection==='principals'?'Principal account · ID ':'Record saved')+(saved.sid||saved.id||''));if(collection==='notices'&&noticeDraft&&'Notification'in window){if(Notification.permission==='granted')new Notification(noticeDraft.title,{body:noticeDraft.message});else if(Notification.permission==='default')Notification.requestPermission();}return refresh();}).catch(function(error){notify(error.message,true);}).finally(function(){loading(false);});
+    }
+  });
+  if(state.token){loading(true);refresh().finally(function(){loading(false);});}else render();
+  setInterval(function(){connectionStatus();if(state.token&&!state.modal&&!state.dirty)refresh();},30000);
+  document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible'&&state.token&&!state.modal&&!state.dirty)refresh();});
+}());
+</script>
